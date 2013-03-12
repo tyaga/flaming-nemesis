@@ -1,26 +1,36 @@
 package main
 
 import (
-	"crypto/md5"
 	"flag"
 	"fmt"
 	"github.com/ziutek/mymysql/mysql"
 	_ "github.com/ziutek/mymysql/native"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
-)
+	"runtime"
 
+	"./tools"
+)
 var (
 	db       mysql.Conn
 	projects ProjectColl
+	verbose  *bool
 )
 
+func LOG(str ...interface{}) {
+	if !*verbose {
+		return;
+	}
+	log.Printf("[gostat] %s", str)
+}
+
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	
 	// options
+	verbose = flag.Bool("verbose", true, "")
 	listen_port := flag.String("port", ":9090", "Port for listen to")
 	db_dsn_flag := flag.String("db-dsn", "tcp://root:root@localhost:3306/statstat", "DB access DSN")
 
@@ -36,15 +46,15 @@ func main() {
 	// retrieve all the projects from a'good old DB
 	projects = *NewProjectColl()
 
-	// background worker for analize and write stat
-	chanPrepare := make(chan *Hash)
-	chanWrite := make(chan *Hash)
+	// background worker for prepare and then write stat
+	chanPrepare := make(chan *tools.Hash)
+	chanWrite := make(chan *tools.Hash)
 
 	// preparator!
 	go func() {
 		for {
 			q := <-chanPrepare
-			log.Printf("[gostat] Analize: %s", *q)
+			LOG("Analize: ", *q)
 
 			project, ok := getQueryProject(q)
 			if !ok {
@@ -54,12 +64,12 @@ func main() {
 			if !ok {
 				continue
 			}
+			
 			ok = project.parseType(q)
 			if !ok {
 				continue
 			}
-			log.Printf("[gostat] %s", *q)
-
+			
 			// send to write channel
 			chanWrite <- q
 		}
@@ -70,24 +80,36 @@ func main() {
 		stmt, _ := db.Prepare("INSERT INTO stats (project_id, type_id, value, meta_type_id, meta_value) VALUES (?, ?, ?, ?, ?)")
 		for {
 			q := <-chanWrite
-			log.Printf("[gostat] Write: %s", *q)
+			LOG("Write: ", *q)
 			// write down
 			stmt.Run((*q)["project_id"], (*q)["type_id"], (*q)["value"], "0", "0")
 		}
 	}()
+	
+	/*func (writes <-chan []byte) { 
+        var buf []byte 
+        for { 
+			data := <-writes
+            buf = append(buf, data) 
+        drain:
+            for len(buf) < 256*1024 { 
+				select {
+					case d := <-writes: 
+						buf = append(buf, d) 
+                    default: 
+						break drain 
+                } 
+            }
+            f.Write(buf) 
+            buf = buf[:0]
+        } 
+	}()*/
 
-	// http
+	// http server
 	http.HandleFunc("/stat", func(w http.ResponseWriter, r *http.Request) {
-		// parse
 		query := ParseQuery(&r.URL.RawQuery)
-
-		// log
-		log.Printf("[gostat] Got stat: %s", query)
-
-		// send to prepare channel
+		LOG("Got stat: ", query)
 		chanPrepare <- &query
-
-		// response
 		w.Header().Set("Content-type", "application/json")
 		fmt.Fprint(w, `{"res": true}`)
 	})
@@ -107,7 +129,7 @@ type Project struct {
 	types  TypeColl
 }
 
-func (self *Project) parseType(q *Hash) bool {
+func (self *Project) parseType(q *tools.Hash) bool {
 	// looking for key=>val in project.types
 	for _, v := range self.types {
 		if value, ok := (*q)[v.name]; ok {
@@ -120,8 +142,8 @@ func (self *Project) parseType(q *Hash) bool {
 	return false
 }
 
-func (self *Project) checkSignature(q *Hash) bool {
-	defer printOnPanic()
+func (self *Project) checkSignature(q *tools.Hash) bool {
+	defer tools.PrintOnPanic()
 
 	sig, ok := (*q)["sig"]
 	if !ok {
@@ -129,28 +151,18 @@ func (self *Project) checkSignature(q *Hash) bool {
 	}
 	delete(*q, "sig")
 
-	arr := []string{}
-	for k, _ := range *q {
-		arr = append(arr, k)
-	}
-	sort.Strings(arr)
-
+	arr := q.SortedKeys();
 	str := ""
 	for _, v := range arr {
 		str = str + v + "=" + (*q)[v]
 	}
 	str = str + self.secret
 
-	expected := signMd5(str)
+	expected := tools.SignMd5(str)
 	if expected != sig {
 		panic("Wrong signature, expected " + expected)
 	}
 	return true
-}
-func signMd5(str string) string {
-	h := md5.New()
-	io.WriteString(h, str)
-	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 type ProjectColl map[int]Project
@@ -171,19 +183,17 @@ func NewProjectColl() *ProjectColl {
 	return &projects
 }
 
-type Hash map[string]string
-
-func ParseQuery(rawQuery *string) Hash {
+func ParseQuery(rawQuery *string) tools.Hash {
 	queryMap, _ := url.ParseQuery(*rawQuery)
-	vals := make(Hash)
+	vals := make(tools.Hash)
 	for k, v := range queryMap {
 		vals[k] = v[0] // never ever assume having multiple stats
 	}
 	return vals
 }
 
-func getQueryProject(q *Hash) (Project, bool) {
-	defer printOnPanic()
+func getQueryProject(q *tools.Hash) (Project, bool) {
+	defer tools.PrintOnPanic()
 
 	project_idx, ok := (*q)["project_id"]
 	if !ok {
@@ -198,10 +208,4 @@ func getQueryProject(q *Hash) (Project, bool) {
 		panic("Wrong project")
 	}
 	return project, true
-}
-
-func printOnPanic() {
-	if r := recover(); r != nil {
-		fmt.Println(r)
-	}
 }
