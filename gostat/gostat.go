@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"runtime"
+	"time"
 
 	"./tools"
 )
@@ -41,7 +42,10 @@ func main() {
 
 	// database
 	db = mysql.New("tcp", "", db_dsn.Host, db_dsn.User.Username(), pwd, db_dsn.Path[1:])
-	db.Connect()
+	err := db.Connect()
+	if err != nil {
+        panic(err)
+    }
 
 	// retrieve all the projects from a'good old DB
 	projects = *NewProjectColl()
@@ -49,7 +53,7 @@ func main() {
 	// background worker for prepare and then write stat
 	chanPrepare := make(chan *tools.Hash)
 	chanWrite := make(chan *tools.Hash)
-
+	
 	// preparator!
 	go func() {
 		for {
@@ -61,9 +65,7 @@ func main() {
 				continue
 			}
 			ok = project.checkSignature(q)
-			if !ok {
-				continue
-			}
+			if !ok { continue }
 			
 			ok = project.parseType(q)
 			if !ok {
@@ -77,12 +79,15 @@ func main() {
 
 	// writestignator!
 	go func() {
-		stmt, _ := db.Prepare("INSERT INTO stats (project_id, type_id, value, meta_type_id, meta_value) VALUES (?, ?, ?, ?, ?)")
+		stmt, err := db.Prepare("INSERT INTO stats (project_id, type_id, value, meta_type_id, meta_value) VALUES (?, ?, ?, ?, ?)")
+		if err != nil { fmt.Println(err) }
+		
 		for {
 			q := <-chanWrite
 			LOG("Write: ", *q)
 			// write down
-			stmt.Run((*q)["project_id"], (*q)["type_id"], (*q)["value"], "0", "0")
+			 _, err = stmt.Run((*q)["project_id"], (*q)["type_id"], (*q)["value"], "0", "0")
+			 if err != nil { fmt.Println(err) }
 		}
 	}()
 	
@@ -113,7 +118,12 @@ func main() {
 		w.Header().Set("Content-type", "application/json")
 		fmt.Fprint(w, `{"res": true}`)
 	})
-	http.ListenAndServe(*listen_port, nil)
+	go http.ListenAndServe(*listen_port, nil)
+	
+	for i:=0; i<1; i++{
+		http.Get("http://localhost:9090/stat?project_id=1&wins=2&sig=b11e90a759c795dc1fb0cf59e624fea4")
+	}
+	time.Sleep(time.Microsecond*200);
 }
 
 // Storing and retrieving projects and types
